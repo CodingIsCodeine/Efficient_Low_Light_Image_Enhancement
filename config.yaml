@@ -1,0 +1,108 @@
+# ADLNet Configuration
+
+# Data Configuration
+data:
+  data_root: "./data"  # Path to dataset
+  train_dir: "train"
+  val_dir: "val"
+  test_dir: "test"
+  
+  # Image processing
+  image_size: [256, 256]  # [H, W]
+  normalize: false  # Already normalized to [0, 1] in dataloader
+
+# Model Configuration
+model:
+  base_channels_luminance: 24
+  base_channels_chrominance: 16
+  num_residual_blocks_luminance: 4
+  num_residual_blocks_chrominance: 2
+
+# Training Configuration
+training:
+  # Optimization
+  batch_size: 16
+  num_epochs: 150
+  learning_rate: 0.001
+  min_lr: 0.00001
+  weight_decay: 0.0001
+  
+  # Optimizer
+  optimizer: "adamw"
+  betas: [0.9, 0.999]
+  
+  # Scheduler
+  scheduler: "cosine"
+  warmup_epochs: 5
+  
+  # Mixed precision
+  use_amp: true
+  
+  # Data loading
+  num_workers: 4
+  pin_memory: true
+  
+  # Checkpointing
+  save_every: 10  # Save checkpoint every N epochs
+  keep_last_n: 3  # Keep last N checkpoints
+  
+# Loss Configuration
+loss:
+  # Loss weights
+  weight_perceptual: 1.0
+  weight_ssim: 2.0
+  weight_edge: 0.5
+  weight_color: 0.3
+  weight_smooth: 0.1
+  weight_l1: 0.2
+
+# Augmentation Configuration
+augmentation:
+  training:
+    random_crop: true
+    horizontal_flip: 0.5
+    rotation: 0.3
+    rotation_range: [-10, 10]
+    gamma_adjustment: 0.5
+    gamma_range: [0.5, 1.5]
+    noise_addition: 0.4
+    noise_range: [0.0, 0.05]
+  
+  validation:
+    resize_only: true
+
+# Evaluation Configuration
+evaluation:
+  metrics:
+    - "psnr"
+    - "ssim"
+    - "lpips"
+    - "mae"
+  
+  save_visualizations: true
+  visualization_samples: 10
+
+# Export Configuration
+export:
+  formats: ["pytorch", "onnx", "torchscript"]
+  onnx_opset: 11
+  optimize_for_mobile: false
+
+# Inference Configuration
+inference:
+  device: "cuda"  # or "cpu"
+  batch_size: 1
+  save_intermediate: false  # Save Y, U, V channels
+
+# Logging Configuration
+logging:
+  log_dir: "./logs"
+  tensorboard: true
+  log_every_n_steps: 50
+  save_samples_every_n_epochs: 5
+
+# System Configuration
+system:
+  seed: 42
+  deterministic: false
+  cuda_benchmark: true
