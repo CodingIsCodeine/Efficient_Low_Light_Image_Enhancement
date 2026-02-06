@@ -3,9 +3,9 @@
 # Data Configuration
 data:
   data_root: "./data"  # Path to dataset
-  train_dir: "train"
-  val_dir: "val"
-  test_dir: "test"
+  # train_dir: "train"
+  # val_dir: "val"
+  # test_dir: "test"
   
   # Image processing
   image_size: [256, 256]  # [H, W]
@@ -13,7 +13,8 @@ data:
 
 # Model Configuration
 model:
-  base_channels_luminance: 24
+  base_channels: 32       # Can reduce to 24 if model too large
+  base_channels_luminance: 32
   base_channels_chrominance: 16
   num_residual_blocks_luminance: 4
   num_residual_blocks_chrominance: 2
@@ -21,9 +22,9 @@ model:
 # Training Configuration
 training:
   # Optimization
-  batch_size: 16
+  batch_size: 8 
   num_epochs: 150
-  learning_rate: 0.001
+  learning_rate: 0.0005
   min_lr: 0.00001
   weight_decay: 0.0001
   
@@ -59,6 +60,8 @@ loss:
 # Augmentation Configuration
 augmentation:
   training:
+    crops_per_image: 8      # NEW: Multiple crops per image
+    crop_sizes: [256, 384, 512]  # NEW: Multi-scale 
     random_crop: true
     horizontal_flip: 0.5
     rotation: 0.3

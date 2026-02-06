@@ -16,7 +16,7 @@ import onnxruntime as ort
 import numpy as np
 from pathlib import Path
 
-from model import ADLNet
+from model_v2_novel import SCALENet as ADLNet  # Keep same name for compatibility
 
 
 # ============================================================================
