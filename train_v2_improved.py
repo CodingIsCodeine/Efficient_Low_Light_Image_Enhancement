@@ -38,8 +38,9 @@ class AggressiveAugmentation:
     - Mixup between images
     - CutMix for robustness
     """
-    def __init__(self, crop_size=256, training=True):
-        self.crop_size = crop_size
+    def __init__(self, crop_sizes=[256, 384, 512], training=True):
+        self.crop_sizes = crop_sizes
+        self.current_crop_size = crop_sizes[0]   
         self.training = training
         
     def get_random_crop(self, img, crop_size):
@@ -61,22 +62,31 @@ class AggressiveAugmentation:
     
     def __call__(self, low_img, high_img):
         if not self.training:
-            # Validation: center crop 512x512
-            crop_size = 512
+            crop_size = self.current_crop_size
             w, h = low_img.size
-            i, j = (h - crop_size) // 2, (w - crop_size) // 2
-            
+
+            # resize if smaller (VERY IMPORTANT)
+            if w < crop_size or h < crop_size:
+                scale = crop_size / min(w, h)
+                new_w, new_h = int(w * scale), int(h * scale)
+                low_img = low_img.resize((new_w, new_h), Image.BILINEAR)
+                high_img = high_img.resize((new_w, new_h), Image.BILINEAR)
+                w, h = new_w, new_h
+
+            i = (h - crop_size) // 2
+            j = (w - crop_size) // 2
+
             low_crop = low_img.crop((j, i, j + crop_size, i + crop_size))
             high_crop = high_img.crop((j, i, j + crop_size, i + crop_size))
             
-            low_tensor = torch.from_numpy(np.array(low_crop).astype(np.float32) / 255.0).permute(2, 0, 1).float()
-            high_tensor = torch.from_numpy(np.array(high_crop).astype(np.float32) / 255.0).permute(2, 0, 1).float()
+            low_tensor = torch.from_numpy(np.array(low_crop).astype(np.float32) / 255.0).permute(2, 0, 1)
+            high_tensor = torch.from_numpy(np.array(high_crop).astype(np.float32) / 255.0).permute(2, 0, 1)
             
             return low_tensor, high_tensor
         
         # Training: aggressive augmentation
         # 1. Random crop size
-        crop_size = self.crop_size
+        crop_size = self.current_crop_size
         
         # 2. Get same crop from both images
         w, h = low_img.size
@@ -118,8 +128,8 @@ class AggressiveAugmentation:
             noise = np.random.normal(0, random.uniform(0.01, 0.03), low_np.shape)
             low_np = np.clip(low_np + noise, 0, 1)
         
-        low_tensor = torch.from_numpy(low_np).permute(2, 0, 1).float()
-        high_tensor = torch.from_numpy(high_np).permute(2, 0, 1).float()
+        low_tensor = torch.from_numpy(low_np).permute(2, 0, 1)
+        high_tensor = torch.from_numpy(high_np).permute(2, 0, 1)
         
         return low_tensor, high_tensor
 
@@ -154,7 +164,7 @@ class SmallDatasetMultiCrop(Dataset):
         print(f"{split}: {len(self.image_names)} images × {self.crops_per_image} crops = {len(self)} samples")
         
         self.augmentation = AggressiveAugmentation(
-            crop_size=256,
+            crop_sizes=[256, 384, 512],
             training=(split == 'train')
         )
         
@@ -173,6 +183,10 @@ class SmallDatasetMultiCrop(Dataset):
         
         low_img = Image.open(low_path).convert('RGB')
         high_img = Image.open(high_path).convert('RGB')
+        
+        if low_img.size[0] < 256 or low_img.size[1] < 256:
+            print("SMALL IMAGE:", low_path, low_img.size)
+
         
         low_tensor, high_tensor = self.augmentation(low_img, high_img)
         
@@ -356,11 +370,17 @@ class ProgressiveTrainer:
             shuffle=False,
             num_workers=4
         )
+        self.start_epoch = 0
+        self.best_val_loss = float('inf')
+        # Add this line in __init__ before checkpoint_dir
+        self.start_epoch = 0
+        self.best_val_loss = float('inf')
         
         self.checkpoint_dir = Path(config['checkpoint_dir'])
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
         self.best_val_loss = float('inf')
+        
     
     def train_epoch(self, epoch):
         self.model.train()
@@ -435,8 +455,47 @@ class ProgressiveTrainer:
         if is_best:
             torch.save(checkpoint, self.checkpoint_dir / 'best.pth')
             torch.save(self.model.state_dict(), self.checkpoint_dir / 'best_model.pth')
+        
+    def load_checkpoint(self, checkpoint_path):
+        """Load checkpoint and resume training"""
+        print(f"\nLoading checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        
+        self.start_epoch = checkpoint['epoch'] + 1
+        self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        
+        print(f"✓ Resumed from epoch {checkpoint['epoch']}")
+        print(f"  Best val loss: {self.best_val_loss:.6f}")
+        print(f"  Continuing from epoch {self.start_epoch}")
     
-    def train(self):
+    
+    
+    def load_checkpoint(self, checkpoint_path):
+        """Load checkpoint and resume training"""
+        print(f"\nLoading checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        
+        self.start_epoch = checkpoint['epoch'] + 1
+        self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        
+        print(f"✓ Resumed from epoch {checkpoint['epoch']}")
+        print(f"  Best val loss: {self.best_val_loss:.6f}")
+        print(f"  Continuing from epoch {self.start_epoch}")
+    
+        
+    def train(self,resume_from=None):
+        
+        if resume_from:
+            self.load_checkpoint(resume_from)
+            
         print("Starting Progressive Training")
         print("="*60)
         
@@ -453,8 +512,8 @@ class ProgressiveTrainer:
                 crop_size = 512
 
             # Apply to both train and validation datasets
-            self.train_dataset.augmentation.crop_size = crop_size
-            self.val_dataset.augmentation.crop_size = crop_size
+            self.train_dataset.augmentation.current_crop_size = crop_size
+            self.val_dataset.augmentation.current_crop_size = crop_size
 
             print(f"[INFO] Epoch {epoch+1}: using crop size {crop_size}")
 
@@ -491,6 +550,11 @@ class ProgressiveTrainer:
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--resume', type=str, default=None)
+    args = parser.parse_args()
+    
     config = {
         'data_root': './data',
         'checkpoint_dir': './checkpoints_v2',

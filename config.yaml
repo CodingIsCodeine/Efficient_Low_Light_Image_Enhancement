@@ -13,8 +13,8 @@ data:
 
 # Model Configuration
 model:
-  base_channels: 32       # Can reduce to 24 if model too large
-  base_channels_luminance: 32
+  base_channels: 32
+  base_channels_luminance: 24
   base_channels_chrominance: 16
   num_residual_blocks_luminance: 4
   num_residual_blocks_chrominance: 2
@@ -22,7 +22,7 @@ model:
 # Training Configuration
 training:
   # Optimization
-  batch_size: 8 
+  batch_size: 8
   num_epochs: 150
   learning_rate: 0.0005
   min_lr: 0.00001
@@ -59,9 +59,10 @@ loss:
 
 # Augmentation Configuration
 augmentation:
+  crops_per_image: 8
+  crop_sizes: [256, 384, 512]  # NEW: Multi-scale
+
   training:
-    crops_per_image: 8      # NEW: Multiple crops per image
-    crop_sizes: [256, 384, 512]  # NEW: Multi-scale 
     random_crop: true
     horizontal_flip: 0.5
     rotation: 0.3
