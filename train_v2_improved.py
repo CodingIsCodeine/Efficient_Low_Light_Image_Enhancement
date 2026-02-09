@@ -19,7 +19,7 @@ from pathlib import Path
 import random
 from tqdm import tqdm
 import yaml
-
+import lpips
 from model_v2_novel import SCALENet, CurriculumPatchDiscriminator
 
 
@@ -79,8 +79,8 @@ class AggressiveAugmentation:
             low_crop = low_img.crop((j, i, j + crop_size, i + crop_size))
             high_crop = high_img.crop((j, i, j + crop_size, i + crop_size))
             
-            low_tensor = torch.from_numpy(np.array(low_crop).astype(np.float32) / 255.0).permute(2, 0, 1)
-            high_tensor = torch.from_numpy(np.array(high_crop).astype(np.float32) / 255.0).permute(2, 0, 1)
+            low_tensor = torch.from_numpy(np.array(low_crop)/ 255.0).permute(2, 0, 1).float()
+            high_tensor = torch.from_numpy(np.array(high_crop)/ 255.0).permute(2, 0, 1).float()
             
             return low_tensor, high_tensor
         
@@ -128,8 +128,8 @@ class AggressiveAugmentation:
             noise = np.random.normal(0, random.uniform(0.01, 0.03), low_np.shape)
             low_np = np.clip(low_np + noise, 0, 1)
         
-        low_tensor = torch.from_numpy(low_np).permute(2, 0, 1)
-        high_tensor = torch.from_numpy(high_np).permute(2, 0, 1)
+        low_tensor = torch.from_numpy(low_np).permute(2, 0, 1).float()
+        high_tensor = torch.from_numpy(high_np).permute(2, 0, 1).float()
         
         return low_tensor, high_tensor
 
@@ -324,9 +324,20 @@ class ProgressiveTrainer:
         self.model = SCALENet(base_channels=32).to(self.device)
         print(f"Model parameters: {self.model.count_parameters():,}")
         
+        if torch.cuda.device_count() > 1:
+            print(f"Using {torch.cuda.device_count()} GPUs!")
+            self.model = nn.DataParallel(self.model)
+
+        self.model = self.model.to(self.device)
+
+        print(f"Model parameters: {self.model.module.count_parameters() if isinstance(self.model, nn.DataParallel) else self.model.count_parameters():,}")
+        
         # Loss
         self.criterion = ImprovedLossFunction().to(self.device)
         
+        self.lpips_model = lpips.LPIPS(net='alex').to(self.device)
+        self.lpips_model.eval()
+
         # Optimizer - IMPORTANT: Lower LR for small dataset
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
@@ -360,7 +371,7 @@ class ProgressiveTrainer:
             self.train_dataset,
             batch_size=config['batch_size'],
             shuffle=True,
-            num_workers=4,
+            num_workers=12,
             pin_memory=True
         )
         
@@ -368,7 +379,7 @@ class ProgressiveTrainer:
             self.val_dataset,
             batch_size=config['batch_size'],
             shuffle=False,
-            num_workers=4
+            num_workers=12
         )
         self.start_epoch = 0
         self.best_val_loss = float('inf')
@@ -432,10 +443,16 @@ class ProgressiveTrainer:
                 
                 pred_img = self.model(low_img)
                 loss, loss_dict = self.criterion(pred_img, high_img)
-                
+
+                with torch.no_grad():
+                    lpips_val = self.lpips_model(pred_img * 2 - 1, high_img * 2 - 1).mean()
+
+                loss_dict['lpips'] = lpips_val.item()
+
                 total_loss += loss.item()
                 for k, v in loss_dict.items():
                     loss_dict_sum[k] = loss_dict_sum.get(k, 0) + v
+
         
         avg_loss = total_loss / len(self.val_loader)
         avg_loss_dict = {k: v / len(self.val_loader) for k, v in loss_dict_sum.items()}
@@ -447,6 +464,7 @@ class ProgressiveTrainer:
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(), 
             'val_loss': val_loss
         }
         
@@ -456,22 +474,6 @@ class ProgressiveTrainer:
             torch.save(checkpoint, self.checkpoint_dir / 'best.pth')
             torch.save(self.model.state_dict(), self.checkpoint_dir / 'best_model.pth')
         
-    def load_checkpoint(self, checkpoint_path):
-        """Load checkpoint and resume training"""
-        print(f"\nLoading checkpoint: {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        
-        self.start_epoch = checkpoint['epoch'] + 1
-        self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-        
-        print(f"✓ Resumed from epoch {checkpoint['epoch']}")
-        print(f"  Best val loss: {self.best_val_loss:.6f}")
-        print(f"  Continuing from epoch {self.start_epoch}")
-    
     
     
     def load_checkpoint(self, checkpoint_path):
@@ -481,7 +483,10 @@ class ProgressiveTrainer:
         
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        if 'scheduler_state_dict' in checkpoint:
+            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        else:
+            print("⚠️ Scheduler state not found in checkpoint (old run). Continuing with fresh scheduler.")
         
         self.start_epoch = checkpoint['epoch'] + 1
         self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
@@ -499,7 +504,7 @@ class ProgressiveTrainer:
         print("Starting Progressive Training")
         print("="*60)
         
-        for epoch in range(self.config['epochs']):
+        for epoch in range(self.start_epoch, self.config['epochs']):
 
             # =========================================
             # SET CROP SIZE FOR THIS EPOCH (IMPORTANT)
@@ -536,6 +541,8 @@ class ProgressiveTrainer:
             print(f"  Val Loss:   {val_loss:.6f}")
             print(f"  Val SSIM:   {val_dict['ssim']:.6f} (1-SSIM={1-val_dict['ssim']:.6f})")
             print(f"  Val Percep: {val_dict['perceptual']:.6f}")
+            print(f"  Val LPIPS:  {val_dict['lpips']:.6f}")
+
             
             # Save
             is_best = val_loss < self.best_val_loss
@@ -558,12 +565,12 @@ def main():
     config = {
         'data_root': './data',
         'checkpoint_dir': './checkpoints_v2',
-        'batch_size': 8,  # Larger images, smaller batch
+        'batch_size': 32,  # Larger images, smaller batch
         'epochs': 150
     }
     
     trainer = ProgressiveTrainer(config)
-    trainer.train()
+    trainer.train(resume_from=args.resume)
 
 
 if __name__ == "__main__":

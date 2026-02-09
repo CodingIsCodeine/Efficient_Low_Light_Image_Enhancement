@@ -22,7 +22,7 @@ model:
 # Training Configuration
 training:
   # Optimization
-  batch_size: 8
+  batch_size: 32
   num_epochs: 150
   learning_rate: 0.0005
   min_lr: 0.00001
@@ -40,7 +40,7 @@ training:
   use_amp: true
   
   # Data loading
-  num_workers: 4
+  num_workers: 12
   pin_memory: true
   
   # Checkpointing
