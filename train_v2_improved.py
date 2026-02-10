@@ -19,8 +19,10 @@ from pathlib import Path
 import random
 from tqdm import tqdm
 import yaml
+import copy
 import lpips
 from model_v2_novel import SCALENet, CurriculumPatchDiscriminator
+
 
 
 # ============================================================================
@@ -341,10 +343,17 @@ class ProgressiveTrainer:
         # Optimizer - IMPORTANT: Lower LR for small dataset
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
-            lr=5e-4,  # Lower than before!
+            lr=5e-6,  # Lower than before!
             betas=(0.9, 0.999),
             weight_decay=1e-4
         )
+                # after optimizer creation
+        self.ema_model = copy.deepcopy(self.model).to(self.device)
+        for p in self.ema_model.parameters():
+            p.requires_grad = False
+
+        self.ema_decay = 0.999
+
         
         # Scheduler with warmup
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
@@ -405,6 +414,12 @@ class ProgressiveTrainer:
             low_img = low_img.to(self.device)
             high_img = high_img.to(self.device)
             
+            
+                        # tiny label smoothing for regression
+            noise = torch.randn_like(high_img) * 0.01
+            high_img = torch.clamp(high_img + noise, 0, 1)
+
+            
             # Forward
             pred_img = self.model(low_img)
             loss, loss_dict = self.criterion(pred_img, high_img)
@@ -417,6 +432,12 @@ class ProgressiveTrainer:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             
             self.optimizer.step()
+            
+                        # AFTER self.optimizer.step()
+            with torch.no_grad():
+                for ema_p, p in zip(self.ema_model.parameters(), self.model.parameters()):
+                    ema_p.data = self.ema_decay * ema_p.data + (1 - self.ema_decay) * p.data
+
             
             # Accumulate
             total_loss += loss.item()
@@ -441,7 +462,7 @@ class ProgressiveTrainer:
                 low_img = low_img.to(self.device)
                 high_img = high_img.to(self.device)
                 
-                pred_img = self.model(low_img)
+                pred_img = self.ema_model(low_img)
                 loss, loss_dict = self.criterion(pred_img, high_img)
 
                 with torch.no_grad():
@@ -477,23 +498,40 @@ class ProgressiveTrainer:
     
     
     def load_checkpoint(self, checkpoint_path):
-        """Load checkpoint and resume training"""
         print(f"\nLoading checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        if 'scheduler_state_dict' in checkpoint:
-            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+        # -------------------------------------------------
+        # CASE 1 — FULL CHECKPOINT (resume training)
+        # -------------------------------------------------
+        if 'model_state_dict' in checkpoint:
+            print("Resuming full training checkpoint")
+
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+            if 'scheduler_state_dict' in checkpoint:
+                self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+            self.start_epoch = checkpoint['epoch'] + 1
+            self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+
+            print(f"✓ Resumed from epoch {checkpoint['epoch']}")
+            print(f"  Continuing from epoch {self.start_epoch}")
+
+        # -------------------------------------------------
+        # CASE 2 — WEIGHTS ONLY (fine-tuning mode) ⭐
+        # -------------------------------------------------
         else:
-            print("⚠️ Scheduler state not found in checkpoint (old run). Continuing with fresh scheduler.")
-        
-        self.start_epoch = checkpoint['epoch'] + 1
-        self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-        
-        print(f"✓ Resumed from epoch {checkpoint['epoch']}")
-        print(f"  Best val loss: {self.best_val_loss:.6f}")
-        print(f"  Continuing from epoch {self.start_epoch}")
+            print("🔥 Loading weights-only checkpoint for FINE-TUNING")
+
+            self.model.load_state_dict(checkpoint)
+
+            # IMPORTANT: start fresh training loop
+            self.start_epoch = 0
+            self.best_val_loss = float('inf')
+
+            print("✓ Starting fine-tuning from epoch 1")
     
         
     def train(self,resume_from=None):
@@ -508,13 +546,40 @@ class ProgressiveTrainer:
 
             # =========================================
             # SET CROP SIZE FOR THIS EPOCH (IMPORTANT)
-            # =========================================
-            if epoch < 50:
-                crop_size = 256
-            elif epoch < 100:
-                crop_size = 384
-            else:
-                crop_size = 512
+            # # =========================================
+            # if epoch < 50:
+            #     crop_size = 256
+            #     new_batch_size = 32
+            # elif epoch < 100:
+            #     crop_size = 384
+            #     new_batch_size = 16
+            # else:
+            crop_size = 512
+            new_batch_size = 8
+                
+         
+            if self.train_loader.batch_size != new_batch_size:
+                print(f"[INFO] Updating batch size to {new_batch_size} for crop {crop_size}")
+
+                self.train_loader = DataLoader(
+                    self.train_dataset,
+                    batch_size=new_batch_size,
+                    shuffle=True,
+                    num_workers=12,
+                    pin_memory=True,
+                    persistent_workers=True
+
+                )
+
+                self.val_loader = DataLoader(
+                    self.val_dataset,
+                    batch_size=new_batch_size,
+                    shuffle=False,
+                    num_workers=12,
+                    persistent_workers=True
+
+                )
+
 
             # Apply to both train and validation datasets
             self.train_dataset.augmentation.current_crop_size = crop_size
@@ -566,7 +631,7 @@ def main():
         'data_root': './data',
         'checkpoint_dir': './checkpoints_v2',
         'batch_size': 32,  # Larger images, smaller batch
-        'epochs': 150
+        'epochs': 40
     }
     
     trainer = ProgressiveTrainer(config)

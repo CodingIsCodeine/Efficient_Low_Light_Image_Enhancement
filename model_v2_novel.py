@@ -296,7 +296,7 @@ class SCALENet(nn.Module):
             nn.ReLU(inplace=True),
             
             nn.Conv2d(base_channels, 3, 3, padding=1),
-            nn.Sigmoid()
+            nn.Tanh()
         )
         
         # Component 4: Quality estimator (for validation without GT)
@@ -307,14 +307,17 @@ class SCALENet(nn.Module):
         fused = self.exposure_fusion(x)
         
         # Step 2: Refinement
-        refined = self.refine(fused)
+        residual = self.refine(fused)
+        enhanced = torch.clamp(x + residual - 0.5, 0.0, 1.0)
+
+        
         
         # Optional: Estimate quality
         if return_quality:
-            quality = self.quality_estimator(refined)
-            return refined, quality
+            quality = self.quality_estimator(enhanced)
+            return enhanced, quality
         
-        return refined
+        return enhanced
     
     def count_parameters(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)

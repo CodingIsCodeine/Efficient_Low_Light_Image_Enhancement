@@ -11,6 +11,7 @@ CRITICAL FIXES:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import lpips
 
 
 class CompetitionLoss(nn.Module):
@@ -34,6 +35,11 @@ class CompetitionLoss(nn.Module):
             nn.Sequential(*list(vgg[4:9])),  # relu2_2  
             nn.Sequential(*list(vgg[9:16])), # relu3_3
         ])
+
+        self.lpips = lpips.LPIPS(net='alex')
+        self.lpips.eval()
+        for p in self.lpips.parameters():
+            p.requires_grad = False
         
         for param in self.vgg_layers.parameters():
             param.requires_grad = False
@@ -110,6 +116,12 @@ class CompetitionLoss(nn.Module):
         # Simple color loss in RGB space
         return F.l1_loss(pred, target)
     
+    def lpips_loss(self, pred, target):
+    # LPIPS expects [-1, 1]
+        pred_lp = pred * 2 - 1
+        target_lp = target * 2 - 1
+        return self.lpips(pred_lp, target_lp).mean()
+
     def forward(self, pred, target):
         """
         Combined loss with TUNED weights for competition
@@ -127,12 +139,23 @@ class CompetitionLoss(nn.Module):
         edge = self.edge_loss(pred, target)
         
         # TUNED weights for competition
+        # total = (
+        #     0.5 * l1 +           # Baseline (was 0.2)
+        #     1.5 * ssim +         # Competition metric (was 2.0 - caused collapse!)
+        #     1.5 * perceptual +   # Competition metric (was 1.0 - too low!)
+        #     0.3 * edge           # Detail preservation (was 0.5)
+        # )
+        
+        lpips_val = self.lpips_loss(pred, target)
+
         total = (
-            0.5 * l1 +           # Baseline (was 0.2)
-            1.5 * ssim +         # Competition metric (was 2.0 - caused collapse!)
-            1.5 * perceptual +   # Competition metric (was 1.0 - too low!)
-            0.3 * edge           # Detail preservation (was 0.5)
+            0.15 * l1 +          # slightly reduce
+            0.5 * ssim +        # reduce to avoid oversmoothing
+            0.8 * perceptual +  # still important
+            0.15 * edge +        # small weight
+            1.5 * lpips_val     # 🔥 NEW — competition metric
         )
+
         
         loss_dict = {
             'total': total.item(),
