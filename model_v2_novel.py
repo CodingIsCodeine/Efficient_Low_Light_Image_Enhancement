@@ -366,11 +366,9 @@
 #16th March Claude Updated Version 
 ########################################################################################################
 
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 
 
 class NoiseAwareAdaIN(nn.Module):
@@ -395,32 +393,37 @@ class NoiseAwareAdaIN(nn.Module):
         return self.gamma * (x - mean) / std_comp + self.beta
 
 
-class MultiScaleExposureFusion(nn.Module):
-    def __init__(self, channels=16):
+class ExposureBranch(nn.Module):
+    def __init__(self, channels=64):
         super().__init__()
-        # Learnable gamma exponents (replaces fixed x**0.5 / x**2.0)
+        self.conv1 = nn.Conv2d(3, channels, 3, padding=1)
+        self.norm1 = NoiseAwareAdaIN(channels)
+        self.conv2 = nn.Conv2d(channels, channels, 3, padding=1)
+        self.norm2 = NoiseAwareAdaIN(channels)
+        self.conv3 = nn.Conv2d(channels, 3, 3, padding=1)
+        self.relu = nn.ReLU(inplace=True)
+        self.out_act = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.relu(self.norm1(self.conv1(x)))
+        x = self.relu(self.norm2(self.conv2(x)))
+        return self.out_act(self.conv3(x))
+
+
+class MultiScaleExposureFusion(nn.Module):
+    def __init__(self, channels=64):
+        super().__init__()
         self.gamma_under = nn.Parameter(torch.ones(1) * 0.5)
         self.gamma_over = nn.Parameter(torch.ones(1) * 1.5)
-
-        def _branch(c):
-            return nn.Sequential(
-                nn.Conv2d(3, c, 3, padding=1),
-                NoiseAwareAdaIN(c),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(c, 3, 3, padding=1),
-                nn.Sigmoid()
-            )
-
-        self.enhance_under = _branch(channels)
-        self.enhance_normal = _branch(channels)
-        self.enhance_over = _branch(channels)
-
+        self.enhance_under = ExposureBranch(channels)
+        self.enhance_normal = ExposureBranch(channels)
+        self.enhance_over = ExposureBranch(channels)
         self.fusion_weights = nn.Sequential(
-            nn.Conv2d(3, 16, 3, padding=1),
+            nn.Conv2d(3, 32, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(16, 16, 3, padding=1),
+            nn.Conv2d(32, 32, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(16, 3, 1),
+            nn.Conv2d(32, 3, 1),
             nn.Softmax(dim=1)
         )
 
@@ -428,7 +431,6 @@ class MultiScaleExposureFusion(nn.Module):
         under = self.enhance_under(x.pow(self.gamma_under.clamp(0.2, 1.0)))
         normal = self.enhance_normal(x)
         over = self.enhance_over(x.pow(self.gamma_over.clamp(1.0, 3.0)))
-
         w = self.fusion_weights(x)
         return w[:, 0:1] * under + w[:, 1:2] * normal + w[:, 2:3] * over
 
@@ -436,31 +438,28 @@ class MultiScaleExposureFusion(nn.Module):
 class SCALENet(nn.Module):
     def __init__(self, base_channels=32):
         super().__init__()
-        self.exposure_fusion = MultiScaleExposureFusion(channels=16)
-
-        self.refine = nn.Sequential(
-            nn.Conv2d(3, base_channels, 3, padding=1),
-            NoiseAwareAdaIN(base_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(base_channels, 3, 3, padding=1),
-            nn.Tanh()
-        )
-
-        # Sigmoid-gated residual — replaces clamp(x + residual - 0.5)
-        self.res_gate = nn.Sequential(nn.Conv2d(3, 3, 1), nn.Sigmoid())
+        self.exposure_fusion = MultiScaleExposureFusion(channels=64)
+        self.refine_conv1 = nn.Conv2d(3, base_channels, 3, padding=1)
+        self.refine_norm1 = NoiseAwareAdaIN(base_channels)
+        self.refine_conv2 = nn.Conv2d(base_channels, base_channels, 3, padding=1)
+        self.refine_norm2 = NoiseAwareAdaIN(base_channels)
+        self.refine_out = nn.Conv2d(base_channels, 3, 3, padding=1)
+        self.relu = nn.ReLU(inplace=True)
+        self.tanh = nn.Tanh()
+        self.res_gate = nn.Conv2d(3, 3, 1)
 
     def forward(self, x):
         fused = self.exposure_fusion(x)
-        residual = self.refine(fused)
-        gate = self.res_gate(fused)
-        enhanced = torch.clamp(fused + gate * residual, 0.0, 1.0)
-        return enhanced
+        r = self.relu(self.refine_norm1(self.refine_conv1(fused)))
+        r = self.relu(self.refine_norm2(self.refine_conv2(r)))
+        residual = self.tanh(self.refine_out(r))
+        gate = torch.sigmoid(self.res_gate(fused))
+        return torch.clamp(fused + gate * residual, 0.0, 1.0)
 
     def count_parameters(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
-# Keep for backward compat with train imports
 class CurriculumPatchDiscriminator(nn.Module):
     def __init__(self, input_channels=3):
         super().__init__()
@@ -485,6 +484,9 @@ def verify_model():
     total = model.count_parameters()
     mb = (total * 4) / (1024 ** 2)
     print(f"Params: {total:,}  |  Size: {mb:.4f} MB  |  {'PASS' if mb < 1.0 else 'FAIL'}")
+    for name, mod in model.named_children():
+        p = sum(x.numel() for x in mod.parameters() if x.requires_grad)
+        print(f"  {name}: {p:,}")
     x = torch.randn(1, 3, 256, 256)
     out = model(x)
     print(f"Input: {x.shape}  Output: {out.shape}  Range: [{out.min():.3f}, {out.max():.3f}]")
