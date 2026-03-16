@@ -388,7 +388,7 @@ class ImprovedInference:
 
         total_time = 0
         for p in paths:
-            _, t = self.enhance_image(str(p), str(output_dir / f"{p.name}.png"))
+            _, t = self.enhance_image(str(p), str(output_dir / f"{p.stem}.png"))
             total_time += t
 
         print(f"\nDone: {len(paths)} images in {total_time:.1f}s "
