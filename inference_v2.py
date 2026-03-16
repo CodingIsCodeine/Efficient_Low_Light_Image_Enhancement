@@ -372,7 +372,7 @@ class ImprovedInference:
 
         if output_path:
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-            enhanced_pil.save(output_path, quality=95)
+            enhanced_pil.save(output_path)
             print(f"  Saved: {output_path}")
 
         return enhanced_pil, elapsed
@@ -388,7 +388,7 @@ class ImprovedInference:
 
         total_time = 0
         for p in paths:
-            _, t = self.enhance_image(str(p), str(output_dir / f"enhanced_{p.name}"))
+            _, t = self.enhance_image(str(p), str(output_dir / f"{p.name}.png"))
             total_time += t
 
         print(f"\nDone: {len(paths)} images in {total_time:.1f}s "
