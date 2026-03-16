@@ -806,14 +806,10 @@ class ProgressiveTrainer:
         self.val_loader = None
         self._rebuild_loaders(config['batch_size'])
 
-        self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer,
-            max_lr=2e-4,
-            steps_per_epoch=len(self.train_loader),
-            epochs=config['epochs'],
-            pct_start=0.1,
-            div_factor=25,
-            final_div_factor=1e4
+            T_max=config['epochs'],
+            eta_min=1e-6
         )
 
         self.start_epoch = 0
@@ -861,7 +857,7 @@ class ProgressiveTrainer:
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.optimizer.step()
-            self.scheduler.step()
+            # self.scheduler.step()
 
             with torch.no_grad():
                 for ep, p in zip(self.ema_model.parameters(), self.model.parameters()):
@@ -945,21 +941,14 @@ class ProgressiveTrainer:
             self.start_epoch = 0
             self.best_val_loss = float('inf')
             print("Loaded weights-only checkpoint for fine-tuning")
-            epochs_done = self.start_epoch
-            epochs_left = self.config['epochs'] - epochs_done
+            epochs_left = self.config['epochs'] - self.start_epoch
             if epochs_left > 0:
-                _, resume_batch_size = self._get_stage(self.start_epoch)
-                self._rebuild_loaders(resume_batch_size)
-                self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                     self.optimizer,
-                    max_lr=5e-5,
-                    steps_per_epoch=len(self.train_loader),
-                    epochs=epochs_left,
-                    pct_start=0.05,
-                    div_factor=10,
-                    final_div_factor=1e3
+                    T_max=epochs_left,
+                    eta_min=1e-6
                 )
-                print(f"Rebuilt scheduler for {epochs_left} remaining epochs, max_lr=5e-5")
+                print(f"Rebuilt scheduler for {epochs_left} remaining epochs")
                 
     def train(self, resume_from=None):
         if resume_from:
@@ -979,6 +968,7 @@ class ProgressiveTrainer:
 
             train_loss, train_dict = self.train_epoch(epoch)
             val_loss, val_dict = self.validate()
+            self.scheduler.step()
 
             print(f"  Train Loss: {train_loss:.6f}")
             print(f"  Val   Loss: {val_loss:.6f}")
