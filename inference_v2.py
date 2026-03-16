@@ -339,14 +339,18 @@ class ImprovedInference:
                 weight = np.ones((th, tw, 1))
 
                 if overlap > 0:
+                    def cosine_fade(n):
+                        t = np.linspace(0, 1, n)
+                        return ((1 - np.cos(np.pi * t)) / 2)
+
                     if y1 > 0:
-                        weight[:overlap] *= np.linspace(0, 1, overlap)[:, None, None]
+                        weight[:overlap] *= cosine_fade(overlap)[:, None, None]
                     if x1 > 0:
-                        weight[:, :overlap] *= np.linspace(0, 1, overlap)[None, :, None]
+                        weight[:, :overlap] *= cosine_fade(overlap)[None, :, None]
                     if y2 < h:
-                        weight[-overlap:] *= np.linspace(1, 0, overlap)[:, None, None]
+                        weight[-overlap:] *= cosine_fade(overlap)[::-1, None, None]
                     if x2 < w:
-                        weight[:, -overlap:] *= np.linspace(1, 0, overlap)[None, :, None]
+                        weight[:, -overlap:] *= cosine_fade(overlap)[None, ::-1, None]
 
                 output[y1:y2, x1:x2] += enhanced * weight
                 weight_map[y1:y2, x1:x2] += weight
@@ -398,7 +402,7 @@ def main():
     parser.add_argument('--output', type=str, required=True)
     parser.add_argument('--device', type=str, default='cuda', choices=['cuda', 'cpu'])
     parser.add_argument('--tile_size', type=int, default=512)
-    parser.add_argument('--overlap', type=int, default=32)
+    parser.add_argument('--overlap', type=int, default=128)
     parser.add_argument('--batch', action='store_true')
     args = parser.parse_args()
 
