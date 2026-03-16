@@ -1,8 +1,0 @@
-batch_size: 16
-checkpoint_dir: ./checkpoints
-data_root: ./data
-epochs: 150
-learning_rate: 0.001
-min_lr: 1.0e-05
-num_workers: 4
-weight_decay: 0.0001
