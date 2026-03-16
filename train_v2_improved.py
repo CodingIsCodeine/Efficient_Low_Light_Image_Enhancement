@@ -931,8 +931,6 @@ class ProgressiveTrainer:
         if 'model_state_dict' in ckpt:
             self.model.load_state_dict(ckpt['model_state_dict'])
             self.optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-            if 'scheduler_state_dict' in ckpt:
-                self.scheduler.load_state_dict(ckpt['scheduler_state_dict'])
             if 'ema_state_dict' in ckpt:
                 self.ema_model.load_state_dict(ckpt['ema_state_dict'])
             self.start_epoch = ckpt['epoch'] + 1
@@ -947,14 +945,28 @@ class ProgressiveTrainer:
             self.start_epoch = 0
             self.best_val_loss = float('inf')
             print("Loaded weights-only checkpoint for fine-tuning")
-
+            epochs_done = self.start_epoch
+            epochs_left = self.config['epochs'] - epochs_done
+            if epochs_left > 0:
+                _, resume_batch_size = self._get_stage(self.start_epoch)
+                self._rebuild_loaders(resume_batch_size)
+                self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                    self.optimizer,
+                    max_lr=5e-5,
+                    steps_per_epoch=len(self.train_loader),
+                    epochs=epochs_left,
+                    pct_start=0.05,
+                    div_factor=10,
+                    final_div_factor=1e3
+                )
+                print(f"Rebuilt scheduler for {epochs_left} remaining epochs, max_lr=5e-5")
+                
     def train(self, resume_from=None):
         if resume_from:
             self.load_checkpoint(resume_from)
 
         print("Starting Progressive Training")
         print("=" * 60)
-
         for epoch in range(self.start_epoch, self.config['epochs']):
             crop_size, batch_size = self._get_stage(epoch)
             self._rebuild_loaders(batch_size)

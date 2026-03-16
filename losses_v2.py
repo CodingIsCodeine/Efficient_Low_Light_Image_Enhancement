@@ -252,7 +252,7 @@ class CompetitionLoss(nn.Module):
         fft = self.fft_loss(pred, target)
         lp = self.lpips_fn(pred * 2 - 1, target * 2 - 1).mean()
 
-        total = 0.15*l1 + 0.4*ssim + 0.7*perc + 0.2*fft + 1.2*lp
+        total = 0.15*l1 + 1.0*ssim + 0.5*perc + 0.2*fft + 0.8*lp
 
         return total, {
             'total': total.item(),
