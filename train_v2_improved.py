@@ -692,17 +692,14 @@ class AggressiveAugmentation:
         low_crop = low_img.crop((j, i, j + crop_size, i + crop_size))
         high_crop = high_img.crop((j, i, j + crop_size, i + crop_size))
 
-        # Horizontal flip
         if random.random() > 0.5:
             low_crop = low_crop.transpose(Image.FLIP_LEFT_RIGHT)
             high_crop = high_crop.transpose(Image.FLIP_LEFT_RIGHT)
 
-        # Vertical flip
         if random.random() > 0.5:
             low_crop = low_crop.transpose(Image.FLIP_TOP_BOTTOM)
             high_crop = high_crop.transpose(Image.FLIP_TOP_BOTTOM)
 
-        # Small rotation
         if random.random() > 0.5:
             angle = random.uniform(-15, 15)
             low_crop = low_crop.rotate(angle, Image.BILINEAR)
@@ -711,12 +708,10 @@ class AggressiveAugmentation:
         low_np = np.array(low_crop).astype(np.float32) / 255.0
         high_np = np.array(high_crop).astype(np.float32) / 255.0
 
-        # Gamma aug on low image
         if random.random() > 0.5:
             gamma = random.uniform(0.3, 1.2)
             low_np = np.power(np.clip(low_np, 1e-8, 1.0), gamma)
 
-        # Noise aug on low image
         if random.random() > 0.4:
             noise = np.random.normal(0, random.uniform(0.01, 0.03), low_np.shape)
             low_np = np.clip(low_np + noise, 0, 1)
@@ -728,6 +723,7 @@ class AggressiveAugmentation:
 class SmallDatasetMultiCrop(Dataset):
     def __init__(self, data_root, split='train', crops_per_image=8):
         self.data_root = Path(data_root)
+        self.split = split
         self.crops_per_image = crops_per_image if split == 'train' else 1
 
         low_dir = self.data_root / 'train' / 'low'
@@ -738,7 +734,7 @@ class SmallDatasetMultiCrop(Dataset):
 
         n_train = int(len(all_names) * 0.8)
         self.image_names = all_names[:n_train] if split == 'train' else all_names[n_train:]
-        print(f"{split}: {len(self.image_names)} images × {self.crops_per_image} crops = {len(self)} samples")
+        print(f"{split}: {len(self.image_names)} images x {self.crops_per_image} crops = {len(self)} samples")
 
         self.augmentation = AggressiveAugmentation(
             crop_sizes=[256, 384, 512],
@@ -755,6 +751,18 @@ class SmallDatasetMultiCrop(Dataset):
         low_img = Image.open(self.low_dir / img_name).convert('RGB')
         high_img = Image.open(self.high_dir / img_name).convert('RGB')
         low_t, high_t = self.augmentation(low_img, high_img)
+
+        # MixUp augmentation (30% probability, training only)
+        if self.split == 'train' and random.random() < 0.3:
+            idx2 = random.randint(0, len(self.image_names) - 1)
+            img_name2 = self.image_names[idx2]
+            low2 = Image.open(self.low_dir / img_name2).convert('RGB')
+            high2 = Image.open(self.high_dir / img_name2).convert('RGB')
+            low2, high2 = self.augmentation(low2, high2)
+            alpha = random.uniform(0.3, 0.7)
+            low_t = alpha * low_t + (1 - alpha) * low2
+            high_t = alpha * high_t + (1 - alpha) * high2
+
         return low_t, high_t, img_name
 
 
@@ -793,13 +801,11 @@ class ProgressiveTrainer:
         self.train_dataset = SmallDatasetMultiCrop(config['data_root'], 'train', crops_per_image=8)
         self.val_dataset = SmallDatasetMultiCrop(config['data_root'], 'val', crops_per_image=1)
 
-        # Loaders created lazily by _rebuild_loaders
+        self._current_batch_size = None
         self.train_loader = None
         self.val_loader = None
-        self._current_batch_size = None
         self._rebuild_loaders(config['batch_size'])
 
-        # OneCycleLR: step every batch
         self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
             self.optimizer,
             max_lr=2e-4,
@@ -821,22 +827,22 @@ class ProgressiveTrainer:
         self._current_batch_size = batch_size
         self.train_loader = DataLoader(
             self.train_dataset, batch_size=batch_size,
-            shuffle=True, num_workers=12,
+            shuffle=True, num_workers=4,
             pin_memory=True, persistent_workers=True
         )
         self.val_loader = DataLoader(
             self.val_dataset, batch_size=batch_size,
-            shuffle=False, num_workers=12,
+            shuffle=False, num_workers=4,
             persistent_workers=True
         )
 
     def _get_stage(self, epoch):
         if epoch < 15:
-            return 256, 32
+            return 256, 16
         elif epoch < 30:
-            return 384, 16
+            return 384, 8
         else:
-            return 512, 8
+            return 512, 4
 
     def train_epoch(self, epoch):
         self.model.train()
@@ -894,21 +900,29 @@ class ProgressiveTrainer:
         return total_loss / n, {k: v / n for k, v in loss_dict_sum.items()}
 
     def save_checkpoint(self, epoch, val_loss, is_best=False):
+        # Save EMA weights only as lightweight checkpoint (for resuming with weights-only)
+        ema_sd = {k.replace('module.', ''): v
+                  for k, v in self.ema_model.state_dict().items()}
+        torch.save(ema_sd, self.checkpoint_dir / 'best_model.pth')
+
+        # Full checkpoint for resuming training
+        model_sd = self.model.state_dict()
+        ema_full_sd = self.ema_model.state_dict()
+
         ckpt = {
             'epoch': epoch,
-            'model_state_dict': self.model.state_dict(),
-            'ema_state_dict': self.ema_model.state_dict(),
+            'model_state_dict': model_sd,
+            'ema_state_dict': ema_full_sd,
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
-            'val_loss': val_loss
+            'val_loss': val_loss,
+            'best_val_loss': self.best_val_loss
         }
         torch.save(ckpt, self.checkpoint_dir / 'latest.pth')
+
         if is_best:
             torch.save(ckpt, self.checkpoint_dir / 'best.pth')
-            # Save EMA weights as the submission model (generally better)
-            ema_sd = self.ema_model.state_dict()
-            torch.save(ema_sd, self.checkpoint_dir / 'best_model.pth')
-            print(f"  ✓ Saved EMA weights as best_model.pth")
+            print(f"  Saved best checkpoint (SSIM improving)")
 
     def load_checkpoint(self, checkpoint_path):
         print(f"Loading checkpoint: {checkpoint_path}")
@@ -923,9 +937,13 @@ class ProgressiveTrainer:
                 self.ema_model.load_state_dict(ckpt['ema_state_dict'])
             self.start_epoch = ckpt['epoch'] + 1
             self.best_val_loss = ckpt.get('best_val_loss', float('inf'))
-            print(f"Resumed from epoch {ckpt['epoch']}, continuing from {self.start_epoch}")
+            print(f"Resumed from epoch {ckpt['epoch']}, continuing from epoch {self.start_epoch}")
         else:
-            self.model.load_state_dict(ckpt)
+            # weights-only
+            sd = {('module.' + k if not k.startswith('module.') and
+                   torch.cuda.device_count() > 1 else k): v
+                  for k, v in ckpt.items()}
+            self.model.load_state_dict(sd, strict=False)
             self.start_epoch = 0
             self.best_val_loss = float('inf')
             print("Loaded weights-only checkpoint for fine-tuning")
@@ -939,14 +957,12 @@ class ProgressiveTrainer:
 
         for epoch in range(self.start_epoch, self.config['epochs']):
             crop_size, batch_size = self._get_stage(epoch)
-
-            # Rebuild loaders only when batch size changes
             self._rebuild_loaders(batch_size)
-
             self.train_dataset.augmentation.current_crop_size = crop_size
             self.val_dataset.augmentation.current_crop_size = crop_size
 
-            print(f"\n[Epoch {epoch+1}] crop={crop_size} batch={batch_size} "
+            print(f"\n[Epoch {epoch+1}/{self.config['epochs']}] "
+                  f"crop={crop_size} batch={batch_size} "
                   f"lr={self.optimizer.param_groups[0]['lr']:.2e}")
 
             train_loss, train_dict = self.train_epoch(epoch)
@@ -961,10 +977,9 @@ class ProgressiveTrainer:
             is_best = val_loss < self.best_val_loss
             if is_best:
                 self.best_val_loss = val_loss
-            self.save_checkpoint(epoch, val_loss, is_best)
 
-        print("=" * 60)
-        print(f"Training complete. Best val loss: {self.best_val_loss:.6f}")
+            # Save every epoch (latest) and on improvement (best)
+            self.save_checkpoint(epoch, val_loss, is_best)
 
 
 def main():
@@ -979,7 +994,7 @@ def main():
     config = {
         'data_root': args.data_root,
         'checkpoint_dir': args.checkpoint_dir,
-        'batch_size': 32,
+        'batch_size': 16,
         'epochs': args.epochs
     }
 
